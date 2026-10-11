@@ -131,6 +131,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pull-requests: read
 
     steps:
       - name: Download build artifacts
