@@ -21,7 +21,8 @@ RES="$CONTENTS/Resources"
 ARCH="$(uname -m)"
 APP_VERSION="${APP_VERSION:-1.0.0}"
 APP_BUILD="${APP_BUILD:-1}"
-if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$APP_BUILD" =~ ^[0-9]+$ ]]; then
+APP_RELEASE_LABEL="${APP_RELEASE_LABEL:-v$APP_VERSION}"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$APP_BUILD" =~ ^[0-9]+$ || ! "$APP_RELEASE_LABEL" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
   echo "Invalid APP_VERSION or APP_BUILD" >&2
   exit 1
 fi
@@ -63,6 +64,8 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>__APP_VERSION__</string>
     <key>CFBundleVersion</key>         <string>__APP_BUILD__</string>
+    <key>EnvManageReleaseVersion</key> <string>__APP_RELEASE_LABEL__</string>
+    <key>CFBundleGetInfoString</key>   <string>EnvManage __APP_RELEASE_LABEL__</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>NSHighResolutionCapable</key> <true/>
@@ -72,7 +75,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-sed -i '' -e "s/__APP_VERSION__/$APP_VERSION/g" -e "s/__APP_BUILD__/$APP_BUILD/g" "$CONTENTS/Info.plist"
+sed -i '' -e "s/__APP_VERSION__/$APP_VERSION/g" -e "s/__APP_BUILD__/$APP_BUILD/g" -e "s/__APP_RELEASE_LABEL__/$APP_RELEASE_LABEL/g" "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 echo "[5/6] 本地 ad-hoc 签名…"

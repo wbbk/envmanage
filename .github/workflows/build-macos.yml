@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Change this base version when starting development for the next formal release.
+  PREVIEW_BASE_VERSION: '1.0.0'
+
 # Avoid spending runner minutes on superseded pushes and PR updates.
 # Release tag builds are never cancelled by a newer push.
 concurrency:
@@ -56,6 +60,8 @@ jobs:
         run: |
           set -euo pipefail
           export APP_BUILD="$GITHUB_RUN_NUMBER"
+          export APP_VERSION="$PREVIEW_BASE_VERSION"
+          export APP_RELEASE_LABEL="v${APP_VERSION}-beta.${APP_BUILD}"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
             if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,6 +69,7 @@ jobs:
               exit 1
             fi
             export APP_VERSION="$version"
+            export APP_RELEASE_LABEL="v$version"
           fi
           bash build.sh
 
@@ -77,6 +84,14 @@ jobs:
           test -s "$dmg"
           test -f "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            expected_label="$GITHUB_REF_NAME"
+          else
+            expected_label="v${PREVIEW_BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
+          fi
+          actual_label="$(/usr/libexec/PlistBuddy -c 'Print :EnvManageReleaseVersion' "$app/Contents/Info.plist")"
+          test "$actual_label" = "$expected_label"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = "$GITHUB_RUN_NUMBER"
           codesign --verify --deep --strict --verbose=2 "$app"
           test "$(lipo -archs "$binary")" = "${{ matrix.arch }}"
           hdiutil verify -quiet "$dmg"
@@ -110,7 +125,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    # PRs only validate the build. Main updates the rolling ARM preview; version tags publish both architectures.
+    # PRs only validate the build. Main publishes numbered ARM64 beta releases; version tags publish both architectures.
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -125,29 +140,40 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Publish continuous ARM64 preview
+      - name: Publish numbered ARM64 beta release
         if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # A single rolling prerelease avoids accumulating one release per push.
-          tag="continuous"
+          tag="v${PREVIEW_BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
           test -s release/EnvManage-arm64.dmg
           test -s release/EnvManage-arm64.app.zip
           test -s release/SHA256-arm64.txt
-          notes="$(printf 'Automatically built from main (ARM64).\n\nCommit: %s\nWorkflow: https://github.com/%s/actions/runs/%s\n\nThis prerelease uses an ad-hoc signature; it is not notarized by Apple.\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          notes="$(printf 'ARM64 test build %s from main.\n\nCommit: %s\nWorkflow: https://github.com/%s/actions/runs/%s\n\nThe application is ad-hoc signed and not Apple notarized.\n' "$tag" "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Update assets first; only move the rolling tag once upload succeeds.
-            gh release upload "$tag" release/EnvManage-arm64.dmg release/EnvManage-arm64.app.zip release/SHA256-arm64.txt --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$tag" --title "EnvManage Continuous (ARM64)" --notes "$notes" --prerelease --repo "$GITHUB_REPOSITORY"
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            gh release upload "$tag" release/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$tag" --title "EnvManage $tag (ARM64 beta)" --notes "$notes" --prerelease --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$tag" release/EnvManage-arm64.dmg release/EnvManage-arm64.app.zip release/SHA256-arm64.txt \
-              --title "EnvManage Continuous (ARM64)" --notes "$notes" --prerelease --latest=false \
+            gh release create "$tag" release/* \
+              --title "EnvManage $tag (ARM64 beta)" --notes "$notes" --prerelease --latest=false \
               --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
+
+          # Keep the 3 most recent beta releases for rollback and keep storage in check.
+          # Never delete formal releases or prereleases from a different version series.
+          mapfile -t outdated < <(
+            gh release list --limit 100 --json tagName,isPrerelease --repo "$GITHUB_REPOSITORY" \
+            | jq -r --arg prefix "v${PREVIEW_BASE_VERSION}-beta." \
+                '.[] | select(.isPrerelease and (.tagName | startswith($prefix))) | .tagName' \
+            | sort -V | head -n -3
+          )
+          for previous_tag in "${outdated[@]}"; do
+            if ! gh release delete "$previous_tag" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"; then
+              echo "::warning::Could not prune beta release $previous_tag"
+            fi
+          done
 
       - name: Publish versioned release (ARM64 + Intel)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -165,3 +191,29 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
+
+      - name: Delete merged initial CI branch (safe one-time cleanup)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="ci/macos-app-build-20261011"
+          expected_head="573ce5b5aaedfef59e8487d45e9993c4c6f06d6b"
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -z "$current_head" ]]; then
+            echo "The initial CI branch is already deleted."
+            exit 0
+          fi
+          if [[ "$current_head" != "$expected_head" ]]; then
+            echo "::warning::CI branch head changed; refusing to delete it."
+            exit 0
+          fi
+          merged="$(gh api "repos/$GITHUB_REPOSITORY/pulls/1" --jq '.merged')"
+          if [[ "$merged" != "true" ]]; then
+            echo "::warning::PR #1 is not merged; retaining the branch."
+            exit 0
+          fi
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null
+          echo "Deleted merged branch: $branch"
