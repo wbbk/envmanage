@@ -19,6 +19,12 @@ CONTENTS="$APPDIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RES="$CONTENTS/Resources"
 ARCH="$(uname -m)"
+APP_VERSION="${APP_VERSION:-1.0.0}"
+APP_BUILD="${APP_BUILD:-1}"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$APP_BUILD" =~ ^[0-9]+$ ]]; then
+  echo "Invalid APP_VERSION or APP_BUILD" >&2
+  exit 1
+fi
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 TARGET="${ARCH}-apple-macosx13.0"
 
@@ -55,8 +61,8 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>      <string>com.envmanage.app</string>
     <key>CFBundleExecutable</key>      <string>EnvManage</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>1.0.0</string>
-    <key>CFBundleVersion</key>         <string>1</string>
+    <key>CFBundleShortVersionString</key> <string>__APP_VERSION__</string>
+    <key>CFBundleVersion</key>         <string>__APP_BUILD__</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>NSHighResolutionCapable</key> <true/>
@@ -66,6 +72,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+sed -i '' -e "s/__APP_VERSION__/$APP_VERSION/g" -e "s/__APP_BUILD__/$APP_BUILD/g" "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 echo "[5/6] 本地 ad-hoc 签名…"
