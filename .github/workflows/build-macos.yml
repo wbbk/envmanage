@@ -137,7 +137,7 @@ jobs:
           test -s release/EnvManage-arm64.dmg
           test -s release/EnvManage-arm64.app.zip
           test -s release/SHA256-arm64.txt
-          notes="$(printf 'Automatically built from main (ARM64).\\n\\nCommit: %s\\nWorkflow: https://github.com/%s/actions/runs/%s\\n\\nThis prerelease uses an ad-hoc signature; it is not notarized by Apple.\\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          notes="$(printf 'Automatically built from main (ARM64).\n\nCommit: %s\nWorkflow: https://github.com/%s/actions/runs/%s\n\nThis prerelease uses an ad-hoc signature; it is not notarized by Apple.\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Update assets first; only move the rolling tag once upload succeeds.
             gh release upload "$tag" release/EnvManage-arm64.dmg release/EnvManage-arm64.app.zip release/SHA256-arm64.txt --clobber --repo "$GITHUB_REPOSITORY"
