@@ -110,8 +110,10 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # PRs only validate the build. Main updates the rolling ARM preview; version tags publish both architectures.
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
 
@@ -123,7 +125,32 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Publish tagged release
+      - name: Publish continuous ARM64 preview
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A single rolling prerelease avoids accumulating one release per push.
+          tag="continuous"
+          test -s release/EnvManage-arm64.dmg
+          test -s release/EnvManage-arm64.app.zip
+          test -s release/SHA256-arm64.txt
+          notes="$(printf 'Automatically built from main (ARM64).\\n\\nCommit: %s\\nWorkflow: https://github.com/%s/actions/runs/%s\\n\\nThis prerelease uses an ad-hoc signature; it is not notarized by Apple.\\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Update assets first; only move the rolling tag once upload succeeds.
+            gh release upload "$tag" release/EnvManage-arm64.dmg release/EnvManage-arm64.app.zip release/SHA256-arm64.txt --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$tag" --title "EnvManage Continuous (ARM64)" --notes "$notes" --prerelease --repo "$GITHUB_REPOSITORY"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh release create "$tag" release/EnvManage-arm64.dmg release/EnvManage-arm64.app.zip release/SHA256-arm64.txt \
+              --title "EnvManage Continuous (ARM64)" --notes "$notes" --prerelease --latest=false \
+              --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Publish versioned release (ARM64 + Intel)
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
