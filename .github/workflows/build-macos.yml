@@ -134,6 +134,11 @@ jobs:
       pull-requests: read
 
     steps:
+      - name: Check out complete source history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -149,30 +154,43 @@ jobs:
         run: |
           set -euo pipefail
           beta_tag="v${PREVIEW_BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
-          previous="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/continuous" --jq '.object.sha' 2>/dev/null || true)"
+          # Push events provide the precise previous main revision.
+          # Manual runs fall back to the previous continuous release tag.
+          previous="${{ github.event.before }}"
+          if [[ ! "$previous" =~ ^[0-9a-f]{40}$ || "$previous" =~ ^0+$ ]]; then
+            previous="$(git rev-parse --verify 'refs/tags/continuous^{commit}' 2>/dev/null || true)"
+          fi
           notes="$RUNNER_TEMP/release-notes.md"
           changes="$RUNNER_TEMP/release-commit-messages.txt"
           : > "$changes"
 
-          # Read the commit range since the previous continuous release.
-          if [[ "$previous" =~ ^[0-9a-f]{40}$ && "$previous" != "$GITHUB_SHA" ]]; then
-            if gh api "repos/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_SHA" > "$RUNNER_TEMP/compare.json"; then
-              jq -r '.commits | .[-20:][]? | .commit.message | split("\n")[0] | select(length > 0) | "- " + .' \
-                "$RUNNER_TEMP/compare.json" > "$changes"
-              count="$(jq '.commits | length' "$RUNNER_TEMP/compare.json")"
+          if [[ "$previous" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$previous" "$GITHUB_SHA"; then
+            if [[ "$previous" != "$GITHUB_SHA" ]]; then
+              git log --reverse --no-merges --format='%s' "$previous..$GITHUB_SHA" \
+                | tail -n 20 \
+                | sed -E \
+                    -e 's/^feat(\([^)]*\))?!?: /新增功能：/' \
+                    -e 's/^fix(\([^)]*\))?!?: /问题修复：/' \
+                    -e 's/^ci(\([^)]*\))?!?: /构建与发布：/' \
+                    -e 's/^docs(\([^)]*\))?!?: /文档更新：/' \
+                    -e 's/^refactor(\([^)]*\))?!?: /代码优化：/' \
+                    -e 's/^test(\([^)]*\))?!?: /测试改进：/' \
+                    -e 's/^chore(\([^)]*\))?!?: /工程维护：/' \
+                | sed '/^[[:space:]]*$/d; s/^/- /' > "$changes"
+              count="$(git rev-list --count --no-merges "$previous..$GITHUB_SHA")"
               if (( count > 20 )); then
-                printf '%s\n' "- 另有 $((count - 20)) 项提交，详见仓库提交历史。" >> "$changes"
+                printf '%s\n' "- 其余 $((count - 20)) 项提交请查看仓库提交历史。" >> "$changes"
               fi
-            else
-              echo "::warning::Unable to compare release commits; falling back to the current commit message."
             fi
+          else
+            echo "::warning::No usable prior release revision; using the latest commit subject."
           fi
 
           if [[ ! -s "$changes" ]]; then
             if [[ "$previous" == "$GITHUB_SHA" ]]; then
               printf '%s\n' "- 本次重新构建，源码无新增提交。" > "$changes"
             else
-              latest="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.message' | head -n 1)"
+              latest="$(git log -1 --format='%s' "$GITHUB_SHA")"
               printf '%s\n' "- $latest" > "$changes"
             fi
           fi
