@@ -141,6 +141,53 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Generate release notes from Git changes
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          beta_tag="v${PREVIEW_BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
+          previous="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/continuous" --jq '.object.sha' 2>/dev/null || true)"
+          notes="$RUNNER_TEMP/release-notes.md"
+          changes="$RUNNER_TEMP/release-commit-messages.txt"
+          : > "$changes"
+
+          # Read the commit range since the previous continuous release.
+          if [[ "$previous" =~ ^[0-9a-f]{40}$ && "$previous" != "$GITHUB_SHA" ]]; then
+            if gh api "repos/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_SHA" > "$RUNNER_TEMP/compare.json"; then
+              jq -r '.commits | .[-20:][]? | .commit.message | split("\n")[0] | select(length > 0) | "- " + .' \
+                "$RUNNER_TEMP/compare.json" > "$changes"
+              count="$(jq '.commits | length' "$RUNNER_TEMP/compare.json")"
+              if (( count > 20 )); then
+                printf '%s\n' "- 另有 $((count - 20)) 项提交，详见仓库提交历史。" >> "$changes"
+              fi
+            else
+              echo "::warning::Unable to compare release commits; falling back to the current commit message."
+            fi
+          fi
+
+          if [[ ! -s "$changes" ]]; then
+            if [[ "$previous" == "$GITHUB_SHA" ]]; then
+              printf '%s\n' "- 本次重新构建，源码无新增提交。" > "$changes"
+            else
+              latest="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.message' | head -n 1)"
+              printf '%s\n' "- $latest" > "$changes"
+            fi
+          fi
+
+          {
+            printf '**版本：%s**\n\n' "$beta_tag"
+            printf '## 本次更新\n\n'
+            cat "$changes"
+            printf '\n## 安装包\n\n'
+            printf '%s\n' '- `EnvManage-arm64.dmg`：Apple Silicon Mac 安装镜像'
+            printf '%s\n' '- `EnvManage-arm64.app.zip`：Apple Silicon Mac 应用压缩包'
+            printf '%s\n' '- `SHA256-arm64.txt`：安装包校验值'
+          } > "$notes"
+          cat "$notes"
+
       - name: Publish numbered ARM64 beta release
         if: github.ref == 'refs/heads/main'
         shell: bash
@@ -152,18 +199,47 @@ jobs:
           test -s release/EnvManage-arm64.dmg
           test -s release/EnvManage-arm64.app.zip
           test -s release/SHA256-arm64.txt
-          notes="$(printf 'ARM64 test build %s from main.\n\nCommit: %s\nWorkflow: https://github.com/%s/actions/runs/%s\n\nThe application is ad-hoc signed and not Apple notarized.\n' "$tag" "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          test -s "$RUNNER_TEMP/release-notes.md"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" release/* --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$tag" --title "EnvManage $tag (ARM64 beta)" --notes "$notes" --prerelease --repo "$GITHUB_REPOSITORY"
+            gh release edit "$tag" --title "EnvManage $tag（ARM64 测试版）" --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$tag" release/* \
-              --title "EnvManage $tag (ARM64 beta)" --notes "$notes" --prerelease --latest=false \
+              --title "EnvManage $tag（ARM64 测试版）" --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease --latest=false \
               --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
 
-          # Keep the 3 most recent beta releases for rollback and keep storage in check.
-          # Never delete formal releases or prereleases from a different version series.
+      - name: Update continuous release to latest beta
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          beta_tag="v${PREVIEW_BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
+          title="EnvManage $beta_tag（ARM64 持续测试版）"
+          notes="$RUNNER_TEMP/release-notes.md"
+          test -s "$notes"
+          if gh release view continuous --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload continuous release/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit continuous --title "$title" --notes-file "$notes" --prerelease --repo "$GITHUB_REPOSITORY"
+            # Keep the stable continuous URL while advancing its source revision.
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/continuous" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh release create continuous release/* \
+              --title "$title" --notes-file "$notes" --prerelease --latest=false \
+              --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Prune older beta releases
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Preserve continuous, formal releases, and the three newest beta versions.
           mapfile -t outdated < <(
             gh release list --limit 100 --json tagName,isPrerelease --repo "$GITHUB_REPOSITORY" \
             | jq -r --arg prefix "v${PREVIEW_BASE_VERSION}-beta." \
@@ -193,28 +269,3 @@ jobs:
             gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
-      - name: Delete merged initial CI branch (safe one-time cleanup)
-        if: github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          branch="ci/macos-app-build-20261011"
-          expected_head="573ce5b5aaedfef59e8487d45e9993c4c6f06d6b"
-          current_head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
-          if [[ -z "$current_head" ]]; then
-            echo "The initial CI branch is already deleted."
-            exit 0
-          fi
-          if [[ "$current_head" != "$expected_head" ]]; then
-            echo "::warning::CI branch head changed; refusing to delete it."
-            exit 0
-          fi
-          merged="$(gh api "repos/$GITHUB_REPOSITORY/pulls/1" --jq '.merged')"
-          if [[ "$merged" != "true" ]]; then
-            echo "::warning::PR #1 is not merged; retaining the branch."
-            exit 0
-          fi
-          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null
-          echo "Deleted merged branch: $branch"
